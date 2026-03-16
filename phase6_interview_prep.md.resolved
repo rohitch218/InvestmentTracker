@@ -1,0 +1,58 @@
+# Phase 6: Interview Preparation Guide
+
+This document is designed to help you confidently present the Multi-Tenant Investment Portfolio Tracker during technical interviews. It covers how to explain the architecture, likely questions you'll face, and how to discuss future scaling.
+
+## 1. The "Elevator Pitch" (How to Explain the Project)
+
+**What is it?**
+"I built a production-ready, SaaS-style Multi-Tenant Investment Portfolio Tracker. It allows different organizations (tenants) to manage their employees' or clients' investment portfolios securely within a single unified platform."
+
+**What are the key technical highlights?**
+"The backend is built with **Spring Boot (Java 17)** and **MySQL**, utilizing a **discriminator column (`tenant_id`)** approach for multi-tenancy. This is enforced at the Hibernate level using `@SQLRestriction` and a ThreadLocal [TenantContext](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/java/com/investtracker/tenant/TenantContext.java#17-37) to guarantee data isolation. 
+For access control, I implemented a stateless **JWT authentication** mechanism with Spring Security. The frontend is a modern **React SPA (Vite)** using **Redux Toolkit** for state management, **Tailwind CSS/Shadcn** for a sleek UI, and **Recharts** for real-time portfolio visualization. Finally, I containerized the entire stack using multi-stage **Docker** builds and orchestrated it with **Docker Compose**, alongside a **GitHub Actions CI/CD** pipeline."
+
+---
+
+## 2. Common Interview Questions & Answers
+
+### Q: Why did you choose a shared-database/shared-schema approach for multi-tenancy?
+**A:** "For a startup or mid-sized SaaS, shared-schema with a `tenant_id` discriminator is the most cost-effective and easiest to maintain. It avoids the overhead of managing hundreds of separate databases or schemas (which makes migrations a nightmare). To mitigate the risk of cross-tenant data leakage, I didn't rely on developers remembering to add `WHERE tenant_id = X`. Instead, I enforced it via a Spring Interceptor setting a `ThreadLocal` context, and used Hibernate's `@Filter` or `@SQLRestriction` to automatically append the tenant check to every single query globally."
+
+### Q: How are you securing the API? Explain your JWT strategy.
+**A:** "I implemented standard JWT via JJWT (HS256 signature). The [JwtAuthFilter](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/java/com/investtracker/security/JwtAuthFilter.java#34-106) intercepts requests, validates the token signature and expiration, and establishes the Spring `SecurityContext`. 
+*Crucially*, I embedded the `tenant_id` directly inside the JWT payload claims. This means the server trusts the cryptographic signature of the token to determine which tenant the user belongs to, avoiding an extra database lookup on every single request just to verify tenant membership."
+
+### Q: How do you handle file uploads, like the CSV bulk import?
+**A:** "I exposed a `multipart/form-data` endpoint and used `Apache Commons CSV` to stream the file contents. I wrapped the entire parsing and insertion loop inside a Spring `@Transactional` method. This ensures atomicity—if row number 9,000 fails validation, the entire batch rolls back, preventing the database from entering an inconsistent, partially-uploaded state."
+
+### Q: How did you implement Soft Deletes, and why?
+**A:** "In financial applications, you never `DELETE` records because you lose the audit trail. I added a `deleted_at` timestamp column to the [Investment](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/java/com/investtracker/entity/Investment.java#20-122) entity. Using Hibernate's `@SQLRestriction("deleted_at IS NULL")`, every standard `SELECT` query automatically filters out deleted rows. If a user clicks delete, the service simply sets the timestamp to `LocalDateTime.now()`."
+
+### Q: How does the Redux setup work on the frontend?
+**A:** "I used Redux Toolkit to reduce boilerplate. I split the state into logical slices: `authSlice`, `investmentSlice`, and `dashboardSlice`. I heavily utilized `createAsyncThunk` to handle Axios API calls. This automatically dispatches `pending`, `fulfilled`, and `rejected` actions, which I map to UI loading spinners and error toasts seamlessly."
+
+---
+
+## 3. Scaling Strategy
+
+If asked: *"How would you scale this if you suddenly got 10,000 corporate clients?"*
+
+1.  **Read Replicas:** The Dashboard performs heavy aggregate math (SUM, percentages). I would split database traffic: Route all POST/PUT (transactions) to the MySQL Master, and all heavy GET (Dashboard) queries to a pool of Read Replicas.
+2.  **Redis Caching:** The Dashboard data doesn't change every second. I would introduce Redis and cache the `/dashboard` API response for 5-10 minutes, invalidating it only when a new transaction is recorded.
+3.  **Horizontal Auto-Scaling:** Deploy the Spring Boot containers to AWS ECS (Fargate) behind an Application Load Balancer (ALB). Configure auto-scaling policies to spin up more tasks when CPU utilization exceeds 70%.
+4.  **Database Partitioning:** If the `investments` table reaches hundreds of millions of rows, I'd partition the MySQL table by `tenant_id` or `purchase_date` to keep index trees shallow and queries fast.
+
+---
+
+## 4. Microservices Migration Guide
+
+If asked: *"This is currently a monolith. How would you break it down into microservices?"*
+
+"While a modular monolith is perfect for this stage, if team size or domain scope grew massively, I would strangle the monolith into these boundaries based on Domain-Driven Design (DDD):"
+
+1.  **Auth & Identity Service:** Extracts [User](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/java/com/investtracker/entity/User.java#22-117), [Tenant](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/java/com/investtracker/entity/Tenant.java#20-74), and JWT issuance. Serves as the central Identity Provider (IdP).
+2.  **Portfolio Management Service:** Owns the [Investment](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/java/com/investtracker/entity/Investment.java#20-122) and [Transaction](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/java/com/investtracker/entity/Transaction.java#16-74) entities. Focused entirely on CRUD and tracking holdings.
+3.  **Analytics / Aggregation Service:** Owns the Dashboard logic. Instead of performing slow database `GROUP BY`s, it would consume domain events (e.g., `InvestmentCreatedEvent`) via **Apache Kafka** or **RabbitMQ**, maintaining real-time materialized views of portfolio stats in a fast NoSQL database like MongoDB or Redis.
+4.  **Audit Service:** A dedicated sink for compliance. Other services emit `AuditEvent` messages via Kafka, and this service just streams them seamlessly into an append-only datastore or AWS S3 data lake.
+
+An API Gateway (like Spring Cloud Gateway or Kong) would sit in front, routing requests, handling rate limiting, and validating JWT signatures before they hit the downstream microservices.

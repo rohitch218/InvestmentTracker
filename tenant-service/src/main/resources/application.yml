@@ -1,0 +1,25 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: tenant-service
+  
+  datasource:
+    url: jdbc:mysql://${DB_HOST:investment-tracker-db.cr0cww8oy52m.ap-south-1.rds.amazonaws.com}:3306/${DB_NAME_TENANT:investment_tracker_db}?useSSL=false&allowPublicKeyRetrieval=true
+    username: ${DB_USER:admin}
+    password: ${DB_PASSWORD:Mumbai#$11}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+
+logging:
+  level:
+    com.investtracker.tenant: DEBUG
+    org.springframework.security: INFO

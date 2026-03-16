@@ -1,0 +1,174 @@
+services:
+#  db:
+#    image: mysql:8.0
+#    container_name: invest-tracker-db
+#    environment:
+#      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-Mumbai#$11}
+#      MYSQL_DATABASE: ${DB_NAME:-investment_tracker_db}
+#    ports:
+#      - "3306:3306"
+#    volumes:
+#      - db_data:/var/lib/mysql
+#      - ./init-db:/docker-entrypoint-initdb.d
+#    healthcheck:
+#      test: ["CMD", "mysqladmin" ,"ping", "-h", "localhost"]
+#    networks:
+#      - app-network
+
+  redis:
+    image: redis:7.0-alpine
+    container_name: invest-tracker-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - app-network
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: invest-tracker-rabbit
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      - RABBITMQ_DEFAULT_USER=guest
+      - RABBITMQ_DEFAULT_PASS=guest
+    networks:
+      - app-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: invest-tracker-backend
+    ports:
+      - "8080:8080"
+    environment:
+      - SPRING_PROFILES_ACTIVE=dev
+      - SPRING_DATASOURCE_URL=jdbc:mysql://investment-tracker-db.cr0cww8oy52m.ap-south-1.rds.amazonaws.com:3306/${DB_NAME:-investment_tracker_db}?useSSL=false&allowPublicKeyRetrieval=true
+      - SPRING_DATASOURCE_USERNAME=${DB_USER:-admin}
+      - SPRING_DATASOURCE_PASSWORD=${DB_PASSWORD:-Mumbai#$11}
+      - APP_JWT_SECRET=${JWT_SECRET:-9ZcX2P8a+yH/4kLqS5fWjR7tB3nE1mYvX6cV0bN4xMo=}
+    networks:
+      - app-network
+
+  auth-service:
+    build:
+      context: ./auth-service
+      dockerfile: Dockerfile
+    container_name: invest-tracker-auth
+    ports:
+      - "8083:8083"
+    environment:
+      - DB_HOST=investment-tracker-db.cr0cww8oy52m.ap-south-1.rds.amazonaws.com
+      - DB_NAME=investment_tracker_db
+      - DB_USER=${DB_USER:-admin}
+      - DB_PASSWORD=${DB_PASSWORD:-Mumbai#$11}
+      - JWT_SECRET=${JWT_SECRET:-9ZcX2P8a+yH/4kLqS5fWjR7tB3nE1mYvX6cV0bN4xMo=}
+      - TENANT_SERVICE_URL=http://tenant-service:8082
+    networks:
+      - app-network
+
+  tenant-service:
+    build:
+      context: ./tenant-service
+      dockerfile: Dockerfile
+    container_name: invest-tracker-tenant
+    ports:
+      - "8082:8082"
+    environment:
+      - DB_HOST=investment-tracker-db.cr0cww8oy52m.ap-south-1.rds.amazonaws.com
+      - DB_NAME_TENANT=investment_tracker_db
+      - DB_USER=${DB_USER:-admin}
+      - DB_PASSWORD=${DB_PASSWORD:-Mumbai#$11}
+    networks:
+      - app-network
+
+  portfolio-service:
+    build:
+      context: ./portfolio-service
+      dockerfile: Dockerfile
+    container_name: invest-tracker-portfolio
+    ports:
+      - "8084:8084"
+    environment:
+      - DB_HOST=investment-tracker-db.cr0cww8oy52m.ap-south-1.rds.amazonaws.com
+      - DB_NAME=investment_tracker_db
+      - DB_USER=${DB_USER:-admin}
+      - DB_PASSWORD=${DB_PASSWORD:-Mumbai#$11}
+      - JWT_SECRET=${JWT_SECRET:-9ZcX2P8a+yH/4kLqS5fWjR7tB3nE1mYvX6cV0bN4xMo=}
+    networks:
+      - app-network
+
+  transaction-service:
+    build:
+      context: ./transaction-service
+      dockerfile: Dockerfile
+    container_name: invest-tracker-transaction
+    ports:
+      - "8085:8085"
+    environment:
+      - DB_HOST=investment-tracker-db.cr0cww8oy52m.ap-south-1.rds.amazonaws.com
+      - DB_NAME=investment_tracker_db
+      - DB_USER=${DB_USER:-admin}
+      - DB_PASSWORD=${DB_PASSWORD:-Mumbai#$11}
+      - JWT_SECRET=${JWT_SECRET:-9ZcX2P8a+yH/4kLqS5fWjR7tB3nE1mYvX6cV0bN4xMo=}
+    networks:
+      - app-network
+
+  audit-service:
+    build:
+      context: ./audit-service
+      dockerfile: Dockerfile
+    container_name: invest-tracker-audit
+    ports:
+      - "8086:8086"
+    environment:
+      - DB_HOST=investment-tracker-db.cr0cww8oy52m.ap-south-1.rds.amazonaws.com
+      - DB_NAME=investment_tracker_db
+      - DB_USER=${DB_USER:-root}
+      - DB_PASSWORD=${DB_PASSWORD:-Mumbai#$11}
+    networks:
+      - app-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: invest-tracker-frontend
+    ports:
+      - "80:80"
+    networks:
+      - app-network
+
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    container_name: invest-tracker-gateway
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - BACKEND_HOST=backend
+      - AUTH_HOST=auth-service
+      - PORTFOLIO_HOST=portfolio-service
+      - TRANSACTION_HOST=transaction-service
+      - AUDIT_HOST=audit-service
+      - JWT_SECRET=${JWT_SECRET:-9ZcX2P8a+yH/4kLqS5fWjR7tB3nE1mYvX6cV0bN4xMo=}
+    depends_on:
+      - backend
+      - auth-service
+      - portfolio-service
+      - transaction-service
+      - audit-service
+      - redis
+    networks:
+      - app-network
+
+volumes:
+  db_data:
+
+networks:
+  app-network:
+    driver: bridge

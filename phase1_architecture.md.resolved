@@ -1,0 +1,537 @@
+# Phase 1 — Architecture & Planning
+## Multi-Tenant Investment Portfolio Tracker
+
+---
+
+## 1. Multi-Tenant Design Strategy
+
+### What is Multi-Tenancy?
+
+Multi-tenancy means **one application instance serves multiple independent customers (tenants)**. Each tenant's data is completely isolated from others, yet the backend infrastructure is shared. Think of it like an apartment building — there is one building, but every floor is a private home.
+
+### Why Single Database / Shared Schema?
+
+There are three classic multi-tenant models:
+
+| Model | Description | Pros | Cons |
+|---|---|---|---|
+| **Database per Tenant** | Each tenant gets its own DB | Perfect isolation | Very expensive at scale |
+| **Schema per Tenant** | One DB, separate schemas | Good isolation | Complex migrations |
+| **Shared Schema** ✅ | One DB, one schema, `tenant_id` column | Cost-efficient, scalable | Requires disciplined filtering |
+
+We choose **Shared Schema with a `tenant_id` discriminator column** because:
+- It is the industry standard for SaaS startups and mid-scale platforms.
+- Migrations are applied once, not N times.
+- It scales well until millions of tenants via DB indexing.
+- It maps cleanly to **Spring's `@Filter` / Hibernate multi-tenancy** hooks.
+
+### Tenant Isolation Flow
+
+```
+HTTP Request
+    │
+    ▼
+JWT Token (contains tenant_id claim)
+    │
+    ▼
+TenantFilter (Spring OncePerRequestFilter)
+    │  extracts tenant_id → stores in TenantContext (ThreadLocal)
+    ▼
+Repository Layer
+    │  Hibernate @Filter automatically appends WHERE tenant_id = ?
+    ▼
+Database (MySQL)
+```
+
+> [!IMPORTANT]
+> `TenantContext` uses a `ThreadLocal<String>` variable. It **must** be cleared after each request (in the filter's `finally` block) to prevent tenant data leakage across threads in the thread pool.
+
+---
+
+## 2. Database Schema Design
+
+### Design Principles
+
+- Every tenant-owned table has a `tenant_id VARCHAR(36)` column (UUID).
+- `tenant_id` is **never nullable** on data tables.
+- All primary keys use `BIGINT AUTO_INCREMENT` for performance.
+- Soft-delete pattern on investments (`deleted_at TIMESTAMP`).
+- Audit log is append-only (no updates, no deletes).
+- Passwords are **never stored in plaintext** — BCrypt hashed.
+
+---
+
+### Table: `tenants`
+
+Stores the company/organization that signed up for the platform.
+
+```sql
+CREATE TABLE tenants (
+    id          VARCHAR(36)  NOT NULL PRIMARY KEY,   -- UUID (e.g. "acme-corp-uuid")
+    name        VARCHAR(100) NOT NULL,                -- "Acme Corp"
+    domain      VARCHAR(100) UNIQUE,                 -- optional SSO domain
+    plan        ENUM('FREE','PRO','ENTERPRISE')
+                             NOT NULL DEFAULT 'FREE',
+    is_active   BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+                             ON UPDATE CURRENT_TIMESTAMP
+);
+```
+
+**Why UUID as PK?** Tenants are referenced across every other table. Using UUID prevents enumeration attacks via sequential integer IDs (a security concern for multi-tenant SaaS).
+
+---
+
+### Table: `users`
+
+Stores all users across all tenants. A user always belongs to exactly one tenant.
+
+```sql
+CREATE TABLE users (
+    id              BIGINT       NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id       VARCHAR(36)  NOT NULL,
+    username        VARCHAR(50)  NOT NULL,
+    email           VARCHAR(150) NOT NULL,
+    password_hash   VARCHAR(255) NOT NULL,           -- BCrypt
+    role            ENUM('ADMIN','USER')
+                                 NOT NULL DEFAULT 'USER',
+    is_active       BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                 ON UPDATE CURRENT_TIMESTAMP,
+
+    UNIQUE KEY uq_email_tenant (email, tenant_id),  -- email unique per tenant
+    INDEX idx_users_tenant (tenant_id),
+    CONSTRAINT fk_users_tenant FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+```
+
+**Why composite unique on `(email, tenant_id)`?** The same email address could legitimately be used in two different tenant orgs. We want uniqueness within a tenant, not globally.
+
+---
+
+### Table: `investments`
+
+Core business entity — one row per investment held by a user.
+
+```sql
+CREATE TABLE investments (
+    id              BIGINT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id       VARCHAR(36)     NOT NULL,
+    user_id         BIGINT          NOT NULL,
+    name            VARCHAR(150)    NOT NULL,         -- "HDFC Bank", "Bitcoin"
+    type            ENUM('STOCK','MUTUAL_FUND','CRYPTO','FIXED_DEPOSIT')
+                                    NOT NULL,
+    symbol          VARCHAR(20),                      -- "HDFCBANK.NS", "BTC"
+    quantity        DECIMAL(18, 8)  NOT NULL,         -- supports fractional crypto
+    purchase_price  DECIMAL(18, 4)  NOT NULL,         -- per unit
+    current_price   DECIMAL(18, 4)  NOT NULL,
+    purchase_date   DATE            NOT NULL,
+    notes           TEXT,
+    deleted_at      TIMESTAMP       NULL DEFAULT NULL, -- soft delete
+    created_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP
+                                    ON UPDATE CURRENT_TIMESTAMP,
+
+    INDEX idx_inv_tenant        (tenant_id),
+    INDEX idx_inv_user          (user_id, tenant_id),
+    INDEX idx_inv_type          (type, tenant_id),
+    INDEX idx_inv_deleted       (deleted_at),
+    CONSTRAINT fk_inv_tenant    FOREIGN KEY (tenant_id) REFERENCES tenants(id),
+    CONSTRAINT fk_inv_user      FOREIGN KEY (user_id)   REFERENCES users(id)
+);
+```
+
+**Computed fields (not stored):**
+
+| Field | Formula |
+|---|---|
+| `invested_amount` | `quantity × purchase_price` |
+| `current_value` | `quantity × current_price` |
+| `profit_loss` | `current_value − invested_amount` |
+| `profit_loss_pct` | `(profit_loss / invested_amount) × 100` |
+
+These are computed in the **Service layer**, not stored, to avoid data inconsistency.
+
+---
+
+### Table: `transactions`
+
+Records every buy/sell event against an investment (also supports CSV bulk upload).
+
+```sql
+CREATE TABLE transactions (
+    id                  BIGINT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id           VARCHAR(36)     NOT NULL,
+    investment_id       BIGINT          NOT NULL,
+    user_id             BIGINT          NOT NULL,
+    transaction_type    ENUM('BUY','SELL','DIVIDEND','SPLIT')
+                                        NOT NULL,
+    quantity            DECIMAL(18, 8)  NOT NULL,
+    price               DECIMAL(18, 4)  NOT NULL,     -- per unit at time of txn
+    transaction_date    DATE            NOT NULL,
+    source              ENUM('MANUAL','CSV_UPLOAD')
+                                        NOT NULL DEFAULT 'MANUAL',
+    created_at          TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_txn_tenant        (tenant_id),
+    INDEX idx_txn_investment    (investment_id, tenant_id),
+    CONSTRAINT fk_txn_tenant    FOREIGN KEY (tenant_id)     REFERENCES tenants(id),
+    CONSTRAINT fk_txn_inv       FOREIGN KEY (investment_id) REFERENCES investments(id)
+);
+```
+
+---
+
+### Table: `audit_logs`
+
+Immutable event log for every data mutation — critical for compliance and debugging.
+
+```sql
+CREATE TABLE audit_logs (
+    id              BIGINT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    tenant_id       VARCHAR(36)     NOT NULL,
+    user_id         BIGINT          NOT NULL,
+    entity_type     VARCHAR(50)     NOT NULL,    -- "Investment", "User"
+    entity_id       BIGINT          NOT NULL,
+    action          ENUM('CREATE','UPDATE','DELETE','LOGIN','LOGOUT','CSV_UPLOAD')
+                                    NOT NULL,
+    old_value       JSON,                        -- snapshot before change
+    new_value       JSON,                        -- snapshot after change
+    ip_address      VARCHAR(45),                 -- IPv4 or IPv6
+    user_agent      VARCHAR(255),
+    occurred_at     TIMESTAMP       NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    INDEX idx_audit_tenant   (tenant_id),
+    INDEX idx_audit_user     (user_id, tenant_id),
+    INDEX idx_audit_entity   (entity_type, entity_id, tenant_id),
+    INDEX idx_audit_occurred (occurred_at)
+);
+```
+
+> [!NOTE]
+> `audit_logs` is the **only table without a `deleted_at`** column. Audit records must never be deleted or modified — they are the source of truth for compliance.
+
+---
+
+## 3. Entity Relationship Diagram (ERD)
+
+```mermaid
+erDiagram
+    TENANTS {
+        varchar(36)  id           PK
+        varchar(100) name
+        varchar(100) domain
+        enum         plan
+        boolean      is_active
+        timestamp    created_at
+    }
+
+    USERS {
+        bigint       id           PK
+        varchar(36)  tenant_id    FK
+        varchar(50)  username
+        varchar(150) email
+        varchar(255) password_hash
+        enum         role
+        boolean      is_active
+        timestamp    created_at
+    }
+
+    INVESTMENTS {
+        bigint       id           PK
+        varchar(36)  tenant_id    FK
+        bigint       user_id      FK
+        varchar(150) name
+        enum         type
+        varchar(20)  symbol
+        decimal      quantity
+        decimal      purchase_price
+        decimal      current_price
+        date         purchase_date
+        timestamp    deleted_at
+    }
+
+    TRANSACTIONS {
+        bigint       id              PK
+        varchar(36)  tenant_id       FK
+        bigint       investment_id   FK
+        bigint       user_id         FK
+        enum         transaction_type
+        decimal      quantity
+        decimal      price
+        date         transaction_date
+        enum         source
+    }
+
+    AUDIT_LOGS {
+        bigint       id          PK
+        varchar(36)  tenant_id   FK
+        bigint       user_id     FK
+        varchar(50)  entity_type
+        bigint       entity_id
+        enum         action
+        json         old_value
+        json         new_value
+        timestamp    occurred_at
+    }
+
+    TENANTS ||--o{ USERS        : "has many"
+    TENANTS ||--o{ INVESTMENTS  : "has many"
+    TENANTS ||--o{ TRANSACTIONS : "has many"
+    TENANTS ||--o{ AUDIT_LOGS   : "has many"
+    USERS   ||--o{ INVESTMENTS  : "owns"
+    USERS   ||--o{ TRANSACTIONS : "performs"
+    USERS   ||--o{ AUDIT_LOGS   : "generates"
+    INVESTMENTS ||--o{ TRANSACTIONS : "has many"
+```
+
+---
+
+## 4. REST API Endpoint Catalog
+
+### Base URL
+```
+https://api.investtracker.io/api/v1
+```
+
+### 4.1 — Authentication
+
+| Method | Endpoint | Description | Auth |
+|---|---|---|---|
+| `POST` | `/auth/register` | Register a new tenant + admin user | Public |
+| `POST` | `/auth/login` | Login, receive JWT | Public |
+| `POST` | `/auth/refresh` | Refresh access token using refresh token | JWT |
+| `POST` | `/auth/logout` | Invalidate refresh token | JWT |
+
+**POST `/auth/login` — Request Body:**
+```json
+{
+  "email": "admin@acme.com",
+  "password": "S3cur3Pass!"
+}
+```
+**Response:**
+```json
+{
+  "accessToken": "eyJhbGci...",
+  "refreshToken": "dGhpcyBp...",
+  "tokenType": "Bearer",
+  "expiresIn": 3600,
+  "user": {
+    "id": 1,
+    "email": "admin@acme.com",
+    "role": "ADMIN",
+    "tenantId": "acme-tenant-uuid"
+  }
+}
+```
+
+---
+
+### 4.2 — Tenant Management (ADMIN only)
+
+| Method | Endpoint | Description | Role |
+|---|---|---|---|
+| `GET` | `/tenants/me` | Get current tenant details | ADMIN |
+| `PUT` | `/tenants/me` | Update tenant name / plan | ADMIN |
+| `GET` | `/tenants/me/stats` | Tenant-wide aggregate stats | ADMIN |
+
+---
+
+### 4.3 — User Management
+
+| Method | Endpoint | Description | Role |
+|---|---|---|---|
+| `GET` | `/users` | List all users in tenant | ADMIN |
+| `POST` | `/users` | Invite / create a user | ADMIN |
+| `GET` | `/users/{id}` | Get user by ID | ADMIN / self |
+| `PUT` | `/users/{id}` | Update user profile | ADMIN / self |
+| `DELETE` | `/users/{id}` | Deactivate user | ADMIN |
+| `GET` | `/users/me` | Get current user profile | USER |
+| `PUT` | `/users/me/password` | Change own password | USER |
+
+---
+
+### 4.4 — Investments (Core CRUD)
+
+| Method | Endpoint | Description | Role |
+|---|---|---|---|
+| `GET` | `/investments` | List investments (paginated, filtered) | USER |
+| `POST` | `/investments` | Add a new investment | USER |
+| `GET` | `/investments/{id}` | Get single investment detail | USER |
+| `PUT` | `/investments/{id}` | Edit investment | USER |
+| `DELETE` | `/investments/{id}` | Soft-delete investment | USER |
+| `GET` | `/investments/summary` | Aggregate totals for dashboard | USER |
+| `GET` | `/investments/top-performers` | Top N performing assets | USER |
+| `POST` | `/investments/csv-upload` | Bulk upload via CSV | USER |
+| `GET` | `/investments/export` | Export portfolio as CSV | USER |
+
+**GET `/investments` — Query Parameters:**
+
+| Param | Type | Example | Description |
+|---|---|---|---|
+| `page` | int | `0` | Page index (0-based) |
+| `size` | int | `20` | Page size |
+| `sort` | string | `currentValue,desc` | Sort field & direction |
+| `type` | string | `STOCK` | Filter by investment type |
+| `search` | string | `HDFC` | Name/symbol keyword search |
+
+---
+
+### 4.5 — Transactions
+
+| Method | Endpoint | Description | Role |
+|---|---|---|---|
+| `GET` | `/transactions` | List all transactions (paginated) | USER |
+| `GET` | `/transactions/{id}` | Single transaction detail | USER |
+| `GET` | `/investments/{id}/transactions` | Transactions per investment | USER |
+
+---
+
+### 4.6 — Dashboard & Analytics
+
+| Method | Endpoint | Description | Role |
+|---|---|---|---|
+| `GET` | `/dashboard/summary` | Total invested, current value, P&L | USER |
+| `GET` | `/dashboard/allocation` | Investment type distribution (pie chart) | USER |
+| `GET` | `/dashboard/growth` | Portfolio value over time (line chart) | USER |
+| `GET` | `/dashboard/top-performers` | Top 5 best-performing assets | USER |
+
+**GET `/dashboard/summary` — Response:**
+```json
+{
+  "totalInvested": 500000.00,
+  "currentValue": 625000.00,
+  "profitLoss": 125000.00,
+  "profitLossPct": 25.0,
+  "investmentCount": 12,
+  "currency": "INR"
+}
+```
+
+---
+
+### 4.7 — Audit Logs
+
+| Method | Endpoint | Description | Role |
+|---|---|---|---|
+| `GET` | `/audit-logs` | View audit trail (paginated) | ADMIN |
+| `GET` | `/audit-logs/{id}` | Single audit event | ADMIN |
+
+---
+
+## 5. Security Architecture
+
+### JWT Token Strategy
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                       JWT Payload                        │
+├──────────────────────────────────────────────────────────┤
+│  sub        : "1"                (user ID)               │
+│  email      : "admin@acme.com"                           │
+│  role       : "ADMIN"                                    │
+│  tenantId   : "acme-tenant-uuid"                         │
+│  iat        : 1700000000         (issued at)             │
+│  exp        : 1700003600         (expires in 1 hour)     │
+└──────────────────────────────────────────────────────────┘
+```
+
+- **Access Token**: Short-lived (1 hour). Sent in `Authorization: Bearer <token>` header.
+- **Refresh Token**: Long-lived (7 days). Stored in `HttpOnly` secure cookie. Used to issue new access tokens silently.
+- **Secret**: RSA 256 asymmetric key (or HS256 HMAC with a strong env-variable secret).
+
+### Request Security Layers
+
+```
+Incoming Request
+      │
+      ▼
+[1] CORS Filter         — Whitelist allowed origins
+      │
+      ▼
+[2] Rate Limiter        — Prevent brute-force (Bucket4j)
+      │
+      ▼
+[3] JWT Auth Filter     — Validate token, extract claims
+      │
+      ▼
+[4] Tenant Context      — Set tenant_id in ThreadLocal
+      │
+      ▼
+[5] Spring Security     — Role-based authorization
+      │
+      ▼
+[6] Controller          — Business logic
+      │
+      ▼
+[7] Hibernate Filter    — WHERE tenant_id = :tenantId (auto-appended)
+      │
+      ▼
+[8] Tenant Context Cleanup — ThreadLocal.remove()
+```
+
+---
+
+## 6. Project Module Structure
+
+```
+investment-tracker/
+│
+├── backend/                        ← Spring Boot application
+│   └── src/main/java/com/investtracker/
+│       ├── config/                 ← Security, CORS, Swagger config
+│       ├── controller/             ← REST controllers
+│       ├── dto/                    ← Request & Response DTOs
+│       ├── entity/                 ← JPA entities
+│       ├── exception/              ← Custom exceptions & global handler
+│       ├── filter/                 ← JwtAuthFilter, TenantFilter
+│       ├── repository/             ← Spring Data JPA repositories
+│       ├── security/               ← JwtUtil, UserDetailsService
+│       ├── service/                ← Business logic
+│       └── tenant/                 ← TenantContext, TenantInterceptor
+│
+├── frontend/                       ← React + Vite application
+│   └── src/
+│       ├── app/                    ← Redux store
+│       ├── components/             ← Reusable UI components
+│       │   ├── layout/             ← Sidebar, Navbar
+│       │   ├── ui/                 ← StatCard, InvestmentTable, Modals
+│       │   └── charts/             ← PieChart, LineChart wrappers
+│       ├── features/               ← Redux slices (auth, investments)
+│       ├── hooks/                  ← Custom hooks
+│       ├── pages/                  ← Dashboard, Login, Investments
+│       ├── routes/                 ← ProtectedRoute, AppRouter
+│       └── services/               ← Axios API service layer
+│
+├── docker/
+│   ├── backend.Dockerfile
+│   ├── frontend.Dockerfile
+│   └── docker-compose.yml
+│
+└── docs/
+    ├── phase1_architecture.md      ← This document
+    └── api-spec.yaml               ← OpenAPI / Swagger spec
+```
+
+---
+
+## 7. Key Design Decisions Summary
+
+| Decision | Choice | Reason |
+|---|---|---|
+| Multi-tenant model | Shared schema + `tenant_id` | Cost-efficient, scalable |
+| Auth | JWT (Access + Refresh tokens) | Stateless, scalable, industry standard |
+| Tenant isolation | Hibernate `@Filter` | Automatic, impossible to forget in queries |
+| Soft delete | `deleted_at` timestamp | Audit compliance, accidental delete recovery |
+| Password hashing | BCrypt (strength 12) | Industry standard, timing-attack resistant |
+| Audit logs | Separate append-only table | Compliance, non-repudiation |
+| Primary keys | `BIGINT AUTO_INCREMENT` for data, UUID for tenants | Performance (clustered index) + security |
+| Computed financials | Calculate in service, not stored | Prevent data drift, always fresh |
+
+---
+
+> **Next Step → Phase 2: Backend Development**
+> We will set up the Spring Boot project, create all JPA Entities, implement JWT + Security, and wire the Tenant Filter.

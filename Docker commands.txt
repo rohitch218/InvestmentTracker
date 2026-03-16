@@ -1,0 +1,36 @@
+docker network create invest-network
+
+# (Optional: Only if you still want a local DB)
+# docker run -d \
+#   --name invest-tracker-db \
+#   --network invest-network \
+#   -e MYSQL_ROOT_PASSWORD=Mumbai#$11 \
+#   -e MYSQL_DATABASE=investment_tracker_db \
+#   -p 3306:3306 \
+#   -v invest_db_data:/var/lib/mysql \
+#   mysql:8.0
+
+# Build (run this from the project root)
+docker build -t invest-backend ./backend
+
+# Run
+docker run -d \
+  --name invest-tracker-backend \
+  --network invest-network \
+  -p 8080:8080 \
+  -e SPRING_PROFILES_ACTIVE=dev \
+  -e "SPRING_DATASOURCE_URL=jdbc:mysql://investment-tracker-db.cr0cww8oy52m.ap-south-1.rds.amazonaws.com:3306/investment_tracker_db?useSSL=false&allowPublicKeyRetrieval=true" \
+  -e SPRING_DATASOURCE_USERNAME=admin \
+  -e SPRING_DATASOURCE_PASSWORD=Mumbai#$11 \
+  -e APP_JWT_SECRET=9ZcX2P8a+yH/4kLqS5fWjR7tB3nE1mYvX6cV0bN4xMo= \
+  invest-backend
+
+# Build
+docker build -t invest-frontend ./frontend
+
+# Run
+docker run -d \
+  --name invest-tracker-frontend \
+  --network invest-network \
+  -p 80:80 \
+  invest-frontend

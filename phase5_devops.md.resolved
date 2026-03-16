@@ -1,0 +1,29 @@
+# Phase 5: DevOps Architecture & Deployment
+
+This architecture document outlines the cloud deployment topologies, environment strategies, and CI/CD pipelines configured for the multi-tenant portfolio tracker.
+
+## 1. Containerization Strategy
+We employ **Multi-Stage Dockerfiles** to ensure security and minimized footprint.
+- **Backend (Spring Boot):** The JDK 17 Maven build produces a Fat JAR which is then injected into a minimal `eclipse-temurin:17-jre-jammy` layer. Crucially, the JVM runs under a non-root `spring` user to protect the host node from arbitrary code execution vulnerabilities.
+- **Frontend (Vite + React):** Outputs static assets via a Node.js compiler into a highly optimized `nginx:alpine` reverse proxy. [nginx.conf](file:///d:/A-Rohit/Projects/InvestmentTracker/frontend/nginx.conf) is configured to natively intercept Route 404s and redirect them to `index.html` to support React Router mapping effortlessly.
+
+## 2. Local Orchestration
+The provided [docker-compose.yml](file:///d:/A-Rohit/Projects/InvestmentTracker/docker-compose.yml) abstracts infrastructure concerns for local developers. Leveraging the `healthcheck` property on the `mysql:8.0` container ensures the Backend module delays its Hibernate validation phases until the database TCP socket is explicitly responding to pings, preventing "Connection Refused" stack trace crashes on startup.
+
+## 3. Environment Variable Strategy
+All sensitive tokens MUST NOT be hard-coded into [application.yml](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/resources/application.yml).
+The project uses top-level injections:
+- `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD`
+- `APP_JWT_SECRET` (Requires minimum 256-bit base64 random string)
+
+A template [.env.example](file:///d:/A-Rohit/Projects/InvestmentTracker/.env.example) exposes these requirements safely. In AWS, these map directly to **AWS Systems Manager (SSM) Parameter Store** or **Secrets Manager** during Task Definition injection via ECS.
+
+## 4. AWS Deployment Blueprint (ECS/Fargate)
+For a scalable multi-tenant SaaS application, AWS ECS with Fargate is recommended due to low operational overhead.
+1. **Networking:** Provision a VPC with 2 Public Subnets (For ALB) and 2 Private Subnets (For RDS & ECS Tasks).
+2. **Database Layer:** Provision an Amazon Aurora Serverless 🐾 clusters (MySQL compatible) in Private subnets. Multi-tenancy isolation logic functions beautifully on single instances until multi-terabyte limits.
+3. **Application Load Balancer (ALB):** Terminates HTTPS traffic (ACM certificates) at the perimeter. Forwards `/api/*` to the Backend Target Group (Port 8080) and all default traffic `/` to the Frontend Nginx Target Group (Port 80).
+4. **Fargate compute:** Auto-scaling groups dynamically spawn backend task containers under high CPU load. Nginx frontend containers remain highly static and eventually offload completely onto CloudFront + S3 if required.
+
+## 5. CI/CD Paradigm (GitHub Actions)
+The configured [.github/workflows/deploy.yml](file:///d:/A-Rohit/Projects/InvestmentTracker/.github/workflows/deploy.yml) enforces parallelized stage builds (`build-backend` + `build-frontend`) guaranteeing integration health on Pull Requests. On main branch merges, the `docker-hub-publish` stage is conceptually ready to push immutable tagged images into DockerHub or AWS ECR.

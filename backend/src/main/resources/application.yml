@@ -1,0 +1,131 @@
+# ================================================
+# application.yml — Investment Tracker Backend
+# Active profile: dev (override for prod/docker)
+# ================================================
+
+spring:
+  application:
+    name: investment-tracker
+
+  profiles:
+    active: dev
+
+  # ── JPA / Hibernate ──────────────────────────────
+  jpa:
+    hibernate:
+      ddl-auto: update          # use 'validate' in production
+    show-sql: false             # set true only during local debugging
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: false
+        default_batch_fetch_size: 20
+    open-in-view: false         # prevent lazy-loading anti-pattern
+
+  # ── Jackson ──────────────────────────────────────
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+    time-zone: UTC
+
+# ── Server ──────────────────────────────────────────
+server:
+  port: 8080
+  servlet:
+    context-path: /api/v1
+  error:
+    include-message: never      # never leak stack traces to clients
+
+# ── Application Custom Properties ───────────────────
+app:
+  jwt:
+    secret: ${JWT_SECRET:your-256-bit-super-secure-secret-key-change-in-production}
+    access-token-expiry-ms: 3600000        # 1 hour
+    refresh-token-expiry-ms: 604800000     # 7 days
+  
+  portfolio-service-url: ${PORTFOLIO_SERVICE_URL:http://portfolio-service:8084}
+
+  cors:
+    allowed-origins: http://localhost:5173,http://localhost:8081,http://localhost,http://localhost:80,http://localhost:3000,${FRONTEND_URL:http://localhost:5173}
+
+
+  pagination:
+    default-page-size: 20
+    max-page-size: 100
+
+# ── Actuator ───────────────────────────────────────
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when_authorized
+
+# ── Swagger / OpenAPI ──────────────────────────────
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: method
+
+# ── Logging ────────────────────────────────────────
+logging:
+  level:
+    com.investtracker: DEBUG
+    org.springframework.security: INFO
+    org.hibernate.SQL: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+---
+# ================================================
+# application-dev.yml — Local Development Profile
+# ================================================
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+  datasource:
+    url: jdbc:mysql://investment-tracker-db.cr0cww8oy52m.ap-south-1.rds.amazonaws.com:3306/investment_tracker_db?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true&autoReconnect=true
+    username: ${DB_USERNAME:admin}
+    password: ${DB_PASSWORD:Mumbai#$11}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 30000
+      idle-timeout: 600000
+
+---
+# ================================================
+# application-prod.yml — Production Profile
+# ================================================
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 30
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate          # NEVER use update/create in production
+
+logging:
+  level:
+    com.investtracker: INFO
+    org.springframework.security: WARN

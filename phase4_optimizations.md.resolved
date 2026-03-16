@@ -1,0 +1,26 @@
+# Phase 4: Advanced Features & Optimization Guide
+
+This document outlines the advanced technical implementations applied to the Investment Tracker platform to ensure production readiness, high performance, and deep observability.
+
+## 1. Pagination & Sorting Implementation
+- **API Level**: All core GET endpoints (`/investments`, `/audit-logs`) utilize Spring Data's `Pageable` component, extracting `page` and `size` from the HTTP query params automatically over standard HTTP.
+- **Frontend Optimization**: The React Datagrid leverages these keys via Redux Toolkit Thunks, shifting payload burden off the browser by restricting network transfers to 20-50 localized items per page.
+
+## 2. Database Index Optimization Strategy
+The schemas heavily embrace relational indexes to speed up multi-tenant look-ups. We utilize JPA `@Index` on standard table generations.
+- **Tenant Scope Indexing**: `table_investments` has composite indexes: [(user_id, tenant_id)](file:///d:/A-Rohit/Projects/InvestmentTracker/frontend/src/lib/utils.js#4-7) and [(type, tenant_id)](file:///d:/A-Rohit/Projects/InvestmentTracker/frontend/src/lib/utils.js#4-7).
+- **Soft Deletes**: Added [(deleted_at)](file:///d:/A-Rohit/Projects/InvestmentTracker/frontend/src/lib/utils.js#4-7) individual index since *all* repository queries append `AND deleted_at IS NULL` per `@SQLRestriction`. Without this index, soft-delete clauses can slow down vast tables.
+
+## 3. Comprehensive Logging Strategy
+Implemented SLF4J with Logback [logback-spring.xml](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/resources/logback-spring.xml) containing:
+- **Rolling File Policies**: Segregates raw `invest-tracker.log` output into daily `/archived` intervals with a 10MB split cap.
+- **Pattern Matching**: Implemented colored console outputs for `dev` profiles spanning Thread, Level, Class, and exact millisecond.
+
+## 4. OpenAPI / Swagger Documentation
+- **Endpoint Specification**: Accessible locally via `/swagger-ui/index.html`.
+- **JWT Embedding**: We specified `@SecurityRequirement(name = "bearerAuth")` inside the global [OpenApiConfig](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/java/com/investtracker/config/OpenApiConfig.java#10-30). Developers can authenticate directly via the Swagger UI overlay using their active Session Tokens.
+
+## 5. Performance Optimization Tips (Future Scaling)
+- **Redis Caching**: Introducing `@EnableCaching` backed by Redis for `/dashboard` route since analytical queries (`SUM`, `GROUP BY`) are computationally heavy and highly repetitive.
+- **JPA Projection DTOs**: We map entities to DTOs manually post-retrieval. A micro-optimization is declaring interface-based Projections directly inside [InvestmentRepository](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/java/com/investtracker/repository/InvestmentRepository.java#22-77) so Hibernate skips hydrating entire entity collections.
+- **Read Replicas**: Separate the Hikari pooling for Data Analytics (Dashboard views) to map to a MySQL Read Replica, keeping Write latency low for core POST/PUT [Investment](file:///d:/A-Rohit/Projects/InvestmentTracker/backend/src/main/java/com/investtracker/entity/Investment.java#20-122) flows. 
