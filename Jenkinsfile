@@ -57,7 +57,8 @@ pipeline {
                     
                     servicesToProcess.each { service ->
                         echo "Triggering deployment for: ${service}"
-                        sh "aws ecs update-service --cluster ${PROJECT_NAME}-cluster --service ${PROJECT_NAME}-${service} --force-new-deployment"
+                        def clusterName = "${PROJECT_NAME}-${service}-cluster"
+                        sh "aws ecs update-service --cluster ${clusterName} --service ${PROJECT_NAME}-${service} --force-new-deployment"
                     }
                 }
             }

@@ -1,16 +1,3 @@
-locals {
-  service_configs = {
-    "auth-service"        = { port = 8083, cpu = 256, memory = 512 }
-    "tenant-service"      = { port = 8082, cpu = 256, memory = 512 }
-    "portfolio-service"   = { port = 8084, cpu = 256, memory = 512 }
-    "transaction-service" = { port = 8085, cpu = 256, memory = 512 }
-    "audit-service"       = { port = 8086, cpu = 256, memory = 512 }
-    "gateway"             = { port = 8081, cpu = 256, memory = 512 }
-    "frontend"            = { port = 80,   cpu = 256, memory = 512 }
-    "backend"             = { port = 8080, cpu = 256, memory = 512 }
-  }
-}
-
 resource "aws_ecs_task_definition" "service" {
   for_each                 = local.service_configs
   family                   = "${var.project_name}-${each.key}"
@@ -55,10 +42,10 @@ resource "aws_cloudwatch_log_group" "ecs" {
 
 resource "aws_lb_target_group" "service" {
   for_each    = local.service_configs
-  name        = "${var.project_name}-${each.key}-tg"
+  name        = "tg-${each.key}"
   port        = each.value.port
   protocol    = "HTTP"
-  vpc_id      = aws_vpc.main.id
+  vpc_id      = var.vpc_id
   target_type = "ip"
 
   health_check {
@@ -71,20 +58,35 @@ resource "aws_lb_target_group" "service" {
 resource "aws_ecs_service" "service" {
   for_each        = local.service_configs
   name            = "${var.project_name}-${each.key}"
-  cluster         = aws_ecs_cluster.main.id
+  cluster         = aws_ecs_cluster.service[each.key].id
   task_definition = aws_ecs_task_definition.service[each.key].arn
   desired_count   = 1
   launch_type     = "FARGATE"
 
   network_configuration {
     security_groups  = [aws_security_group.ecs_tasks.id]
-    subnets          = aws_subnet.private[*].id
-    assign_public_ip = false
+    subnets          = var.subnet_ids
+    assign_public_ip = true
   }
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.service[each.key].arn
-    container_name   = each.key
-    container_port   = each.value.port
+  service_registries {
+    registry_arn = aws_service_discovery_service.service[each.key].arn
   }
+
+  # Only frontend and gateway are behind the Load Balancer
+  dynamic "load_balancer" {
+    for_each = contains(["frontend", "gateway"], each.key) ? [1] : []
+    content {
+      target_group_arn = aws_lb_target_group.service[each.key].arn
+      container_name   = each.key
+      container_port   = each.value.port
+    }
+  }
+
+  # Ensure the ALB listener/rules are created before the ECS services
+  depends_on = [
+    aws_lb_listener.http,
+    aws_lb_listener.https,
+    aws_lb_listener_rule.api
+  ]
 }

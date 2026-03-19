@@ -3,7 +3,7 @@ resource "aws_lb" "main" {
   internal           = false
   load_balancer_type = "application"
   security_groups    = [aws_security_group.alb.id]
-  subnets            = aws_subnet.public[*].id
+  subnets            = var.subnet_ids
 
   tags = {
     Name = "${var.project_name}-alb"
@@ -36,6 +36,22 @@ resource "aws_lb_listener" "https" {
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.service["frontend"].arn
+  }
+}
+
+resource "aws_lb_listener_rule" "api" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 100
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.service["gateway"].arn
+  }
+
+  condition {
+    path_pattern {
+      values = ["/api/*", "/auth/*", "/tenant/*"] # Add other paths as needed
+    }
   }
 }
 
