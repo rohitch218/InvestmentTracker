@@ -41,8 +41,7 @@ pipeline {
                     
                     servicesToProcess.each { service ->
                         
-                        def servicePath = service == 'frontend' ? 
-                            'frontend' : "services/${service}"
+                        def servicePath = service
                         
                         dir(servicePath) {
                             

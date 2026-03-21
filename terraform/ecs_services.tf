@@ -58,7 +58,7 @@ resource "aws_lb_target_group" "service" {
 resource "aws_ecs_service" "service" {
   for_each        = local.service_configs
   name            = "${var.project_name}-${each.key}"
-  cluster         = aws_ecs_cluster.service[each.key].id
+  cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.service[each.key].arn
   desired_count   = 1
   launch_type     = "FARGATE"

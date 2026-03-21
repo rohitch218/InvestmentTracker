@@ -1,6 +1,5 @@
-resource "aws_ecs_cluster" "service" {
-  for_each = local.service_configs
-  name     = "${var.project_name}-${each.key}-cluster"
+resource "aws_ecs_cluster" "main" {
+  name = "${var.project_name}-cluster"
 
   setting {
     name  = "containerInsights"
@@ -8,9 +7,8 @@ resource "aws_ecs_cluster" "service" {
   }
 }
 
-resource "aws_ecs_cluster_capacity_providers" "service" {
-  for_each     = local.service_configs
-  cluster_name = aws_ecs_cluster.service[each.key].name
+resource "aws_ecs_cluster_capacity_providers" "main" {
+  cluster_name = aws_ecs_cluster.main.name
 
   capacity_providers = ["FARGATE"]
 
