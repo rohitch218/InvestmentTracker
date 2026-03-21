@@ -16,31 +16,13 @@ resource "aws_lb_listener" "http" {
   protocol          = "HTTP"
 
   default_action {
-    type = "redirect"
-
-    redirect {
-      port        = "443"
-      protocol    = "HTTPS"
-      status_code = "HTTP_301"
-    }
-  }
-}
-
-resource "aws_lb_listener" "https" {
-  load_balancer_arn = aws_lb.main.arn
-  port              = "443"
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-2016-08"
-  certificate_arn   = var.certificate_arn # Provide this in variables.tf or as a secret
-
-  default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.service["frontend"].arn
   }
 }
 
 resource "aws_lb_listener_rule" "api" {
-  listener_arn = aws_lb_listener.https.arn
+  listener_arn = aws_lb_listener.http.arn
   priority     = 100
 
   action {
@@ -50,7 +32,7 @@ resource "aws_lb_listener_rule" "api" {
 
   condition {
     path_pattern {
-      values = ["/api/*", "/auth/*", "/tenant/*"] # Add other paths as needed
+      values = ["/api/*", "/auth/*", "/tenant/*", "/swagger-ui*", "/v3/api-docs*"]
     }
   }
 }

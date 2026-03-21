@@ -19,9 +19,19 @@ resource "aws_ecs_task_definition" "service" {
           hostPort      = each.value.port
         }
       ]
-      environment = [
-        { name = "SPRING_PROFILES_ACTIVE", value = "prod" }
-      ]
+      environment = flatten([
+        { name = "SPRING_PROFILES_ACTIVE", value = "prod" },
+        # Add Service Discovery Hosts only for the gateway
+        each.key == "gateway" ? [
+          { name = "AUTH_HOST",        value = "auth-service.investtracker.local" },
+          { name = "TENANT_HOST",      value = "tenant-service.investtracker.local" },
+          { name = "PORTFOLIO_HOST",   value = "portfolio-service.investtracker.local" },
+          { name = "TRANSACTION_HOST", value = "transaction-service.investtracker.local" },
+          { name = "AUDIT_HOST",       value = "audit-service.investtracker.local" },
+          { name = "BACKEND_HOST",     value = "backend.investtracker.local" },
+          { name = "REDIS_HOST",       value = "localhost" } 
+        ] : []
+      ])
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -86,7 +96,6 @@ resource "aws_ecs_service" "service" {
   # Ensure the ALB listener/rules are created before the ECS services
   depends_on = [
     aws_lb_listener.http,
-    aws_lb_listener.https,
     aws_lb_listener_rule.api
   ]
 }
