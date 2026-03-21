@@ -141,3 +141,13 @@ springdoc:
         url: /v3/api-docs/transaction
       - name: Audit-Service
         url: /v3/api-docs/audit
+
+# Actuator Configuration for Health Checks
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info
+  endpoint:
+    health:
+      show-details: always
