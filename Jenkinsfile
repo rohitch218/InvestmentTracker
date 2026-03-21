@@ -46,7 +46,7 @@ pipeline {
                         dir(servicePath) {
                             
                             def repoName = "${PROJECT_NAME}-${service}"
-                            def imageTag = "${ECR_REGISTRY}/${repoName}:${BUILD_NUMBER}"
+                            def imageTag = "${ECR_REGISTRY}/${repoName}:latest"
                             
                             echo "Building ${service}..."
                             
