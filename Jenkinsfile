@@ -2,7 +2,9 @@ pipeline {
     agent any
     
     parameters {
-        choice(name: 'SERVICE_TO_DEPLOY', choices: ['all', 'frontend', 'backend', 'gateway', 'auth-service', 'tenant-service', 'portfolio-service', 'transaction-service', 'audit-service'], description: 'Select the service to deploy')
+        choice(name: 'SERVICE_TO_DEPLOY', 
+        choices: ['all', 'frontend', 'backend', 'gateway', 'auth-service', 'tenant-service', 'portfolio-service', 'transaction-service', 'audit-service'], 
+        description: 'Select the service to deploy')
     }
 
     environment {
@@ -14,29 +16,41 @@ pipeline {
     }
     
     stages {
+        
         stage('Checkout') {
             steps {
                 checkout scm
+            }
+        }
+
+        stage('Login to ECR') {
+            steps {
+                sh """
+                aws ecr get-login-password --region ${AWS_REGION} | \
+                docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                """
             }
         }
         
         stage('Build and Push') {
             steps {
                 script {
-                    def servicesToProcess = []
-                    if (params.SERVICE_TO_DEPLOY == 'all') {
-                        servicesToProcess = env.ALL_SERVICES.split(' ')
-                    } else {
-                        servicesToProcess = [params.SERVICE_TO_DEPLOY]
-                    }
+                    def servicesToProcess = params.SERVICE_TO_DEPLOY == 'all' ? 
+                        env.ALL_SERVICES.split(' ') : 
+                        [params.SERVICE_TO_DEPLOY]
                     
                     servicesToProcess.each { service ->
-                        echo "Processing build for: ${service}"
-                        dir(service) {
-                            def repoName = "${PROJECT_NAME}-${service}"
-                            def imageTag = "${ECR_REGISTRY}/${repoName}:latest"
+                        
+                        def servicePath = service == 'frontend' ? 
+                            'frontend' : "services/${service}"
+                        
+                        dir(servicePath) {
                             
-                            sh "aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}"
+                            def repoName = "${PROJECT_NAME}-${service}"
+                            def imageTag = "${ECR_REGISTRY}/${repoName}:${BUILD_NUMBER}"
+                            
+                            echo "Building ${service}..."
+                            
                             sh "docker build -t ${imageTag} ."
                             sh "docker push ${imageTag}"
                         }
@@ -48,17 +62,20 @@ pipeline {
         stage('Deploy to ECS') {
             steps {
                 script {
-                    def servicesToProcess = []
-                    if (params.SERVICE_TO_DEPLOY == 'all') {
-                        servicesToProcess = env.ALL_SERVICES.split(' ')
-                    } else {
-                        servicesToProcess = [params.SERVICE_TO_DEPLOY]
-                    }
+                    def servicesToProcess = params.SERVICE_TO_DEPLOY == 'all' ? 
+                        env.ALL_SERVICES.split(' ') : 
+                        [params.SERVICE_TO_DEPLOY]
                     
                     servicesToProcess.each { service ->
-                        echo "Triggering deployment for: ${service}"
-                        def clusterName = "${PROJECT_NAME}-${service}-cluster"
-                        sh "aws ecs update-service --cluster ${clusterName} --service ${PROJECT_NAME}-${service} --force-new-deployment"
+                        
+                        def clusterName = "${PROJECT_NAME}-cluster"
+                        
+                        sh """
+                        aws ecs update-service \
+                        --cluster ${clusterName} \
+                        --service ${PROJECT_NAME}-${service} \
+                        --force-new-deployment
+                        """
                     }
                 }
             }
